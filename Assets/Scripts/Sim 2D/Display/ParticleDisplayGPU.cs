@@ -11,9 +11,19 @@ public class ParticleDisplay2D : MonoBehaviour
 
 	Material material;
 	ComputeBuffer argsBuffer;
+	ComputeBuffer dummyStatesBuffer; // only allocated by the Simulation2D path; null for SwarmSimulation.
 	Bounds bounds;
 	Texture2D gradientTexture;
 	bool needsUpdate;
+
+	// Per-state display tint. rgba.a = blend weight: 0 = show velocity gradient, 1 = full override.
+	// Calm defaults to alpha 0 so the non-ABM scene and Calm agents are visually unchanged.
+	static readonly Vector4[] DefaultStateColors = new Vector4[3]
+	{
+		new Vector4(1f,   1f,   1f,   0f),    // Calm    - velocity gradient
+		new Vector4(1f,   0.2f, 0.2f, 0.85f), // Scared  - red
+		new Vector4(0.3f, 0.6f, 1f,   0.85f), // Huddle  - blue
+	};
 
 
 	public void Init(Simulation2D sim)
@@ -22,6 +32,11 @@ public class ParticleDisplay2D : MonoBehaviour
 		material.SetBuffer("Positions2D", sim.positionBuffer);
 		material.SetBuffer("Velocities", sim.velocityBuffer);
 		material.SetBuffer("DensityData", sim.densityBuffer);
+
+		// Shader requires a States buffer; the fluid scene has no states, so bind zeros.
+		dummyStatesBuffer = ComputeHelper.CreateStructuredBuffer<uint>(sim.positionBuffer.count);
+		material.SetBuffer("States", dummyStatesBuffer);
+		material.SetVectorArray("StateColors", DefaultStateColors);
 
 		argsBuffer = ComputeHelper.CreateArgsBuffer(mesh, sim.positionBuffer.count);
 		bounds = new Bounds(Vector3.zero, Vector3.one * 10000);
@@ -32,6 +47,8 @@ public class ParticleDisplay2D : MonoBehaviour
         material.SetBuffer("Positions2D", sim.positionBuffer);
         material.SetBuffer("Velocities", sim.velocityBuffer);
         material.SetBuffer("DensityData", sim.densityBuffer);
+        material.SetBuffer("States", sim.statesBuffer);
+        material.SetVectorArray("StateColors", DefaultStateColors);
 
         argsBuffer = ComputeHelper.CreateArgsBuffer(mesh, sim.positionBuffer.count);
         bounds = new Bounds(Vector3.zero, Vector3.one * 10000);
@@ -98,5 +115,6 @@ public class ParticleDisplay2D : MonoBehaviour
 	void OnDestroy()
 	{
 		ComputeHelper.Release(argsBuffer);
+		if (dummyStatesBuffer != null) ComputeHelper.Release(dummyStatesBuffer);
 	}
 }

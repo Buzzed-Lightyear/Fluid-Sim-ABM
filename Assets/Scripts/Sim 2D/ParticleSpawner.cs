@@ -51,12 +51,14 @@ public class ParticleSpawner : MonoBehaviour
         public float2[] positions;
         public float2[] velocities;
         public float[] collisionRadii;
+        public uint[] states;
 
         public ParticleSpawnData(int num)
         {
             positions = new float2[num];
             velocities = new float2[num];
             collisionRadii = new float[num];
+            states = new uint[num]; // all zero = Calm
         }
     }
 

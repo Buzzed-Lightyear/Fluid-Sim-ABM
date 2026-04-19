@@ -14,8 +14,14 @@ RWStructuredBuffer<float2> PredictedPositions;
 RWStructuredBuffer<float2> Velocities;
 RWStructuredBuffer<float2> Densities;
 RWStructuredBuffer<float> CollisionRadii;
+RWStructuredBuffer<uint> States;
 RWStructuredBuffer<uint3> SpatialIndices;
 RWStructuredBuffer<uint> SpatialOffsets;
+
+// Per-state parameter table. Index by AgentState (0=Calm, 1=Scared, 2=Huddle).
+// Packed: x = idealNeighborCount, y = cohesionMultiplier, z = speedMultiplier, w = unused.
+static const uint NumStates = 3;
+const float4 StateParams[NumStates];
 
 // Simulation Settings
 const uint numParticles;
@@ -157,6 +163,14 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
     float2 myVel = Velocities[id.x];
     int2 originCell = GetCell2D(pos, sensorRadius);
 
+    // State lookup: unknown values fall back to Calm (index 0).
+    uint stateIdx = States[id.x];
+    if (stateIdx >= NumStates) stateIdx = 0;
+    float4 sp = StateParams[stateIdx];
+    float ideal = sp.x;
+    float cohMult = sp.y;
+    float speedMult = sp.z;
+
     float2 pressureForce = 0;
     float2 viscosityForce = 0;
     float2 avgPos = 0;
@@ -218,22 +232,20 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
     // APPLY BEHAVIORAL STEERING (Conditional)
     if (neighborCount > 0)
     {
-        // DENSITY CONSTRAINT (Social Comfort)
-        // Acts like a feedback controller: only apply separation-like pressure when
-        //   neighborCount exceeds idealNeighborCount (a target local density).
-        float densityError = neighborCount - idealNeighborCount;
+        // DENSITY CONSTRAINT (Social Comfort) - state-modulated ideal count.
+        //   Calm:   ideal = idealNeighborCount (baseline)
+        //   Scared: ideal = 0  (always feels over-crowded -> strong separation)
+        //   Huddle: ideal = 20 (wants company -> separation rarely fires)
+        float densityError = neighborCount - ideal;
         if (densityError > 0)
             totalForce += pressureForce * pressureMultiplier * densityError;
-        // FUTURE ABM: This could be state-dependent logic:
-        //  if (isScared) idealNeighborCount = 0; // Flee everyone
-        //  if (isCold) idealNeighborCount = 20;  // Huddle together
 
         // Apply Alignment (Viscosity)
         totalForce += viscosityForce * viscosity;
 
-        // Apply Cohesion (pull toward neighbor center-of-mass)
+        // Apply Cohesion (pull toward neighbor center-of-mass), scaled by state.
         avgPos /= neighborCount;
-        totalForce += (avgPos - pos) * cohesionStrength;
+        totalForce += (avgPos - pos) * cohesionStrength * cohMult;
     }
 
     // Global Damping (Atmosphere/Friction)
@@ -246,10 +258,10 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
 
     Velocities[id.x] += totalForce * deltaTime;
 
-    // SPEED LIMITS
-    // Agents have a physical speed limit
-    if (length(Velocities[id.x]) > maxSpeed)
-        Velocities[id.x] = normalize(Velocities[id.x]) * maxSpeed;
+    // SPEED LIMITS - state-modulated (Scared agents can run faster).
+    float speedCap = maxSpeed * speedMult;
+    if (length(Velocities[id.x]) > speedCap)
+        Velocities[id.x] = normalize(Velocities[id.x]) * speedCap;
 
     Densities[id.x] = float2(neighborCount, 0);
 }
@@ -278,6 +290,23 @@ void UpdatePositions(uint3 id : SV_DispatchThreadID)
     {
         pos.y = halfSize.y * sign(pos.y);
         vel.y *= -1 * wallBounciness;
+    }
+
+    // Rectangular obstacle. Zero obstacleSize is a no-op (halfSize = 0, edgeDst always <= 0).
+    const float2 obstacleHalfSize = obstacleSize * 0.5;
+    float2 obstacleEdgeDst = obstacleHalfSize - abs(pos - obstacleCentre);
+    if (obstacleEdgeDst.x >= 0 && obstacleEdgeDst.y >= 0)
+    {
+        if (obstacleEdgeDst.x < obstacleEdgeDst.y)
+        {
+            pos.x = obstacleHalfSize.x * sign(pos.x - obstacleCentre.x) + obstacleCentre.x;
+            vel.x *= -1 * wallBounciness;
+        }
+        else
+        {
+            pos.y = obstacleHalfSize.y * sign(pos.y - obstacleCentre.y) + obstacleCentre.y;
+            vel.y *= -1 * wallBounciness;
+        }
     }
 
     Positions[id.x] = pos;

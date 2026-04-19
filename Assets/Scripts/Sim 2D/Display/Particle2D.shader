@@ -21,11 +21,16 @@ Shader "Instanced/Particle2D" {
 			StructuredBuffer<float2> Positions2D;
 			StructuredBuffer<float2> Velocities;
 			StructuredBuffer<float2> DensityData;
+			StructuredBuffer<uint> States;
 			float scale;
 			float4 colA;
 			Texture2D<float4> ColourMap;
 			SamplerState linear_clamp_sampler;
 			float velocityMax;
+
+			// Per-state tint. rgb = color, a = mix weight (0 = velocity gradient, 1 = full override).
+			// Index 0 = Calm (alpha 0 = velocity-only), 1 = Scared, 2 = Huddle.
+			float4 StateColors[3];
 
 			struct v2f
 			{
@@ -47,7 +52,12 @@ Shader "Instanced/Particle2D" {
 				v2f o;
 				o.uv = v.texcoord;
 				o.pos = UnityObjectToClipPos(objectVertPos);
-				o.colour = ColourMap.SampleLevel(linear_clamp_sampler, float2(colT, 0.5), 0);
+
+				float3 velocityColor = ColourMap.SampleLevel(linear_clamp_sampler, float2(colT, 0.5), 0).rgb;
+				uint stateIdx = States[instanceID];
+				if (stateIdx >= 3) stateIdx = 0;
+				float4 sc = StateColors[stateIdx];
+				o.colour = lerp(velocityColor, sc.rgb, sc.a);
 
 				return o;
 			}

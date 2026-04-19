@@ -10,7 +10,8 @@ using Unity.Mathematics;
  *   sensor radius: 0.2 
  *   ideal neighbor count: 21 (~18, have air pockets in the top layers, larger values can result in bottom stacking artifact) 
  *   pressure multiplier: 1 (0-1 have largest behavior changes, then less effective w higher value) 
- *   viscosity: 0.3
+ *   viscosity: 0.03
+ *   drag: 0.1
  *   cohesion strength: 0.2 (no effect till larger sensor raidus ~1) 
  * 
  *   collision radius: 0.05 (lower radius seems to have better fluid behavior, gas maybe can use higher values) 
@@ -22,7 +23,7 @@ using Unity.Mathematics;
  *   Interaction radius: 2.5
  *   Interaction strength: 75
  * 
- *   Particle Spawner: jitter: 0.02, collision radius: 0.05
+ *   Particle Spawner: jitter: 0.02, collision radius: 0.05, count: 16K 
  */
 
 public class SwarmSimulation : MonoBehaviour
@@ -75,6 +76,12 @@ public class SwarmSimulation : MonoBehaviour
     public float interactionRadius = 3;
     public float interactionStrength = 200;
 
+    [Header("Agent States")]
+    [Tooltip("Distance from RMB mouse at which Calm agents flip to Scared.")]
+    public float panicRadius = 2f;
+    [Tooltip("Frames without RMB before Scared agents calm down.")]
+    public int calmdownFrames = 120;
+
     [Header("References")]
     public ComputeShader compute;
     public ParticleSpawner spawner;
@@ -86,9 +93,14 @@ public class SwarmSimulation : MonoBehaviour
     public ComputeBuffer densityBuffer { get; private set; }
     ComputeBuffer predictedPositionBuffer;
     ComputeBuffer collisionRadiiBuffer;
+    public ComputeBuffer statesBuffer { get; private set; }
     ComputeBuffer spatialIndices;
     ComputeBuffer spatialOffsets;
     GPUSort gpuSort;
+
+    // CPU mirror of Agent states - host drives transitions, uploads to GPU each frame.
+    uint[] statesCPU;
+    int framesSinceRMB;
 
     // Kernel IDs
     const int externalForcesKernel = 0;
@@ -122,8 +134,11 @@ public class SwarmSimulation : MonoBehaviour
         velocityBuffer = ComputeHelper.CreateStructuredBuffer<float2>(numParticles);
         densityBuffer = ComputeHelper.CreateStructuredBuffer<float2>(numParticles);
         collisionRadiiBuffer = ComputeHelper.CreateStructuredBuffer<float>(numParticles);
+        statesBuffer = ComputeHelper.CreateStructuredBuffer<uint>(numParticles);
         spatialIndices = ComputeHelper.CreateStructuredBuffer<uint3>(numParticles);
         spatialOffsets = ComputeHelper.CreateStructuredBuffer<uint>(numParticles);
+
+        statesCPU = new uint[numParticles];
 
         SetInitialBufferData(spawnData);
         BindBuffers();
@@ -152,6 +167,7 @@ public class SwarmSimulation : MonoBehaviour
         if (!isPaused)
         {
             float dt = frameTime / iterationsPerFrame * timeScale;
+            UpdateStatesCPU();
             UpdateSettings(dt);
 
             for (int i = 0; i < iterationsPerFrame; i++)
@@ -160,6 +176,60 @@ public class SwarmSimulation : MonoBehaviour
                 SimulationStepCompleted?.Invoke();
             }
         }
+    }
+
+    // Host-side state transitions. Uploads the full states array each frame - the buffer
+    // is small enough (uint per particle) that this is cheap. A dedicated GPU kernel is
+    // future work; the TASK_C spec explicitly allows CPU-driven transitions for v1.
+    void UpdateStatesCPU()
+    {
+        // Calm=0, Scared=1, Huddle=2 (match AgentState enum in ReferenceSim.cs).
+        const uint Calm = 0, Scared = 1, Huddle = 2;
+
+        bool huddleHeld = Input.GetKey(KeyCode.H);
+        bool rmbHeld = Input.GetMouseButton(1);
+
+        Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Vector2[] positionsSnapshot = null;
+        if (rmbHeld)
+        {
+            float2[] posData = new float2[numParticles];
+            positionBuffer.GetData(posData);
+            positionsSnapshot = new Vector2[numParticles];
+            for (int i = 0; i < numParticles; i++)
+                positionsSnapshot[i] = new Vector2(posData[i].x, posData[i].y);
+        }
+
+        if (rmbHeld) framesSinceRMB = 0;
+        else framesSinceRMB++;
+
+        float panicSqr = panicRadius * panicRadius;
+
+        for (int i = 0; i < numParticles; i++)
+        {
+            if (huddleHeld)
+            {
+                statesCPU[i] = Huddle;
+                continue;
+            }
+
+            if (statesCPU[i] == Huddle)
+            {
+                statesCPU[i] = Calm;
+            }
+
+            if (rmbHeld && statesCPU[i] == Calm)
+            {
+                Vector2 d = positionsSnapshot[i] - mousePos;
+                if (d.sqrMagnitude < panicSqr) statesCPU[i] = Scared;
+            }
+            else if (statesCPU[i] == Scared && framesSinceRMB >= calmdownFrames)
+            {
+                statesCPU[i] = Calm;
+            }
+        }
+
+        statesBuffer.SetData(statesCPU);
     }
 
     void RunSimulationStep()
@@ -179,6 +249,7 @@ public class SwarmSimulation : MonoBehaviour
         ComputeHelper.SetBuffer(compute, velocityBuffer, "Velocities", externalForcesKernel, hardCollisionKernel, updateBehaviorKernel, updatePositionKernel);
         ComputeHelper.SetBuffer(compute, densityBuffer, "Densities", updateBehaviorKernel);
         ComputeHelper.SetBuffer(compute, collisionRadiiBuffer, "CollisionRadii", hardCollisionKernel);
+        ComputeHelper.SetBuffer(compute, statesBuffer, "States", updateBehaviorKernel);
         ComputeHelper.SetBuffer(compute, spatialIndices, "SpatialIndices", spatialHashKernel, hardCollisionKernel, updateBehaviorKernel);
         ComputeHelper.SetBuffer(compute, spatialOffsets, "SpatialOffsets", spatialHashKernel, hardCollisionKernel, updateBehaviorKernel);
         compute.SetInt("numParticles", numParticles);
@@ -206,6 +277,14 @@ public class SwarmSimulation : MonoBehaviour
         compute.SetVector("obstacleSize", obstacleSize);
         compute.SetVector("obstacleCentre", obstacleCentre);
 
+        // Per-state param table: (idealNeighborCount, cohesionMult, speedMult, unused).
+        // Calm = baseline; Scared = 0 ideal / no cohesion / 1.5x speed; Huddle = 20 ideal / 3x cohesion / 1x speed.
+        Vector4[] stateParams = new Vector4[3];
+        stateParams[0] = new Vector4(idealNeighborCount, 1f, 1f, 0f);
+        stateParams[1] = new Vector4(0f, 0f, 1.5f, 0f);
+        stateParams[2] = new Vector4(20f, 3f, 1f, 0f);
+        compute.SetVectorArray("StateParams", stateParams);
+
         // Interaction
         Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         float interactStr = 0;
@@ -225,6 +304,10 @@ public class SwarmSimulation : MonoBehaviour
         predictedPositionBuffer.SetData(allPoints);
         velocityBuffer.SetData(spawnData.velocities);
         collisionRadiiBuffer.SetData(spawnData.collisionRadii);
+
+        System.Array.Copy(spawnData.states, statesCPU, spawnData.states.Length);
+        statesBuffer.SetData(statesCPU);
+        framesSinceRMB = calmdownFrames;
     }
 
     void HandleInput()
@@ -251,13 +334,14 @@ public class SwarmSimulation : MonoBehaviour
 
     void OnDestroy()
     {
-        ComputeHelper.Release(positionBuffer, predictedPositionBuffer, velocityBuffer, densityBuffer, collisionRadiiBuffer, spatialIndices, spatialOffsets);
+        ComputeHelper.Release(positionBuffer, predictedPositionBuffer, velocityBuffer, densityBuffer, collisionRadiiBuffer, statesBuffer, spatialIndices, spatialOffsets);
     }
 
     void OnDrawGizmos()
     {
         Gizmos.color = new Color(0, 1, 0, 0.4f);
         Gizmos.DrawWireCube(Vector2.zero, boundsSize);
+        Gizmos.DrawWireCube(obstacleCentre, obstacleSize);
         if (Application.isPlaying)
         {
             Vector2 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);

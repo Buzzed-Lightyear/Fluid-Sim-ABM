@@ -17,35 +17,35 @@ public class SwarmSimulation : MonoBehaviour
 
     [Header("Fluid Physics (Flow)")]
     [Tooltip("How far a particle can 'see'. MUST be > 2x Collision Radius.")]
-    public float sensorRadius = 0.3f; 
+    public float sensorRadius = 0.3f;
 
     [Tooltip("Ideal number of neighbors. Low (0-2) = Gas/Expanding. High (6-10) = Liquid/Pooling.")]
-    public float idealNeighborCount = 8; 
+    public float idealNeighborCount = 8;
 
     [Tooltip("Soft force to maintain spacing when crowded (Fluid Pressure).")]
-    public float pressureMultiplier = 8;  
+    public float pressureMultiplier = 8;
 
     [Tooltip("How strongly particles match velocity (Syrupiness/Flow).")]
-    public float viscosity = 1; 
+    public float viscosity = 1;
 
     [Tooltip("Air resistance. 0 = Vacuum, 1 = Molasses.")]
     [Range(0, 1)] public float drag = 0.1f;
 
     [Header("Collision & Stability (Structure)")]
-    [Tooltip("The hard physical core of the particle.")]
-    public float collisionRadius = 0.05f; 
+    [Tooltip("Reference value for the sensorRadius sanity check. Actual per-agent collision radii come from ParticleSpawner.defaultCollisionRadius and are stored in a GPU buffer.")]
+    public float collisionRadius = 0.05f;
 
     [Tooltip("How hard solid particles push back when overlapping. Higher = Stiffer/Harder.")]
     public float collisionStiffness = 20; // The "Kick" multiplier
 
     [Tooltip("Helps the pile stand up against gravity. 0 = Collapses flat.")]
-    public float verticalSupport = 0.0f; // Not needed? 
+    public float verticalSupport = 0.0f; // Not needed?
 
     [Header("Safety Limits")]
     public float maxSpeed = 5;
     [Tooltip("Maximum force allowed. Increase this if particles sink through floor.")]
     public float maxForce = 50;
-    // Make sure maxForce is > gravity * some constant, else gravity will make particles to disobey neighbors rules on the border. 
+    // Make sure maxForce is > gravity * some constant, else gravity will make particles to disobey neighbors rules on the border.
 
     [Header("Interaction")]
     public float interactionRadius = 3;
@@ -61,6 +61,7 @@ public class SwarmSimulation : MonoBehaviour
     public ComputeBuffer velocityBuffer { get; private set; }
     public ComputeBuffer densityBuffer { get; private set; }
     ComputeBuffer predictedPositionBuffer;
+    ComputeBuffer collisionRadiiBuffer;
     ComputeBuffer spatialIndices;
     ComputeBuffer spatialOffsets;
     GPUSort gpuSort;
@@ -68,8 +69,9 @@ public class SwarmSimulation : MonoBehaviour
     // Kernel IDs
     const int externalForcesKernel = 0;
     const int spatialHashKernel = 1;
-    const int updateBoidsKernel = 2;
-    const int updatePositionKernel = 3;
+    const int hardCollisionKernel = 2;
+    const int updateBehaviorKernel = 3;
+    const int updatePositionKernel = 4;
 
     bool isPaused;
     bool pauseNextFrame;
@@ -95,6 +97,7 @@ public class SwarmSimulation : MonoBehaviour
         predictedPositionBuffer = ComputeHelper.CreateStructuredBuffer<float2>(numParticles);
         velocityBuffer = ComputeHelper.CreateStructuredBuffer<float2>(numParticles);
         densityBuffer = ComputeHelper.CreateStructuredBuffer<float2>(numParticles);
+        collisionRadiiBuffer = ComputeHelper.CreateStructuredBuffer<float>(numParticles);
         spatialIndices = ComputeHelper.CreateStructuredBuffer<uint3>(numParticles);
         spatialOffsets = ComputeHelper.CreateStructuredBuffer<uint>(numParticles);
 
@@ -140,18 +143,20 @@ public class SwarmSimulation : MonoBehaviour
         ComputeHelper.Dispatch(compute, numParticles, kernelIndex: externalForcesKernel);
         ComputeHelper.Dispatch(compute, numParticles, kernelIndex: spatialHashKernel);
         gpuSort.SortAndCalculateOffsets();
-        ComputeHelper.Dispatch(compute, numParticles, kernelIndex: updateBoidsKernel);
+        ComputeHelper.Dispatch(compute, numParticles, kernelIndex: hardCollisionKernel);
+        ComputeHelper.Dispatch(compute, numParticles, kernelIndex: updateBehaviorKernel);
         ComputeHelper.Dispatch(compute, numParticles, kernelIndex: updatePositionKernel);
     }
 
     void BindBuffers()
     {
         ComputeHelper.SetBuffer(compute, positionBuffer, "Positions", externalForcesKernel, updatePositionKernel);
-        ComputeHelper.SetBuffer(compute, predictedPositionBuffer, "PredictedPositions", externalForcesKernel, spatialHashKernel, updateBoidsKernel);
-        ComputeHelper.SetBuffer(compute, velocityBuffer, "Velocities", externalForcesKernel, updateBoidsKernel, updatePositionKernel);
-        ComputeHelper.SetBuffer(compute, densityBuffer, "Densities", updateBoidsKernel);
-        ComputeHelper.SetBuffer(compute, spatialIndices, "SpatialIndices", spatialHashKernel, updateBoidsKernel);
-        ComputeHelper.SetBuffer(compute, spatialOffsets, "SpatialOffsets", spatialHashKernel, updateBoidsKernel);
+        ComputeHelper.SetBuffer(compute, predictedPositionBuffer, "PredictedPositions", externalForcesKernel, spatialHashKernel, hardCollisionKernel, updateBehaviorKernel);
+        ComputeHelper.SetBuffer(compute, velocityBuffer, "Velocities", externalForcesKernel, hardCollisionKernel, updateBehaviorKernel, updatePositionKernel);
+        ComputeHelper.SetBuffer(compute, densityBuffer, "Densities", updateBehaviorKernel);
+        ComputeHelper.SetBuffer(compute, collisionRadiiBuffer, "CollisionRadii", hardCollisionKernel);
+        ComputeHelper.SetBuffer(compute, spatialIndices, "SpatialIndices", spatialHashKernel, hardCollisionKernel, updateBehaviorKernel);
+        ComputeHelper.SetBuffer(compute, spatialOffsets, "SpatialOffsets", spatialHashKernel, hardCollisionKernel, updateBehaviorKernel);
         compute.SetInt("numParticles", numParticles);
     }
 
@@ -167,7 +172,6 @@ public class SwarmSimulation : MonoBehaviour
         compute.SetFloat("viscosity", viscosity);
         compute.SetFloat("drag", drag);
 
-        compute.SetFloat("collisionRadius", collisionRadius);
         compute.SetFloat("collisionStiffness", collisionStiffness);
         compute.SetFloat("verticalSupport", verticalSupport);
 
@@ -196,6 +200,7 @@ public class SwarmSimulation : MonoBehaviour
         positionBuffer.SetData(allPoints);
         predictedPositionBuffer.SetData(allPoints);
         velocityBuffer.SetData(spawnData.velocities);
+        collisionRadiiBuffer.SetData(spawnData.collisionRadii);
     }
 
     void HandleInput()
@@ -222,7 +227,7 @@ public class SwarmSimulation : MonoBehaviour
 
     void OnDestroy()
     {
-        ComputeHelper.Release(positionBuffer, predictedPositionBuffer, velocityBuffer, densityBuffer, spatialIndices, spatialOffsets);
+        ComputeHelper.Release(positionBuffer, predictedPositionBuffer, velocityBuffer, densityBuffer, collisionRadiiBuffer, spatialIndices, spatialOffsets);
     }
 
     void OnDrawGizmos()

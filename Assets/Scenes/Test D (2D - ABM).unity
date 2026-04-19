@@ -38,7 +38,6 @@ RenderSettings:
   m_ReflectionIntensity: 1
   m_CustomReflection: {fileID: 0}
   m_Sun: {fileID: 0}
-  m_IndirectSpecularColor: {r: 0.3731193, g: 0.38073996, b: 0.35872698, a: 1}
   m_UseRadianceAmbientProbe: 0
 --- !u!157 &3
 LightmapSettings:
@@ -169,23 +168,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e15450568b888ce43b8a480ff4bf4902, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  mesh: {fileID: 0}
-  shader: {fileID: 0}
-  scale: 0
+  mesh: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}
+  shader: {fileID: 4800000, guid: 935635d988e4086489e82802847d7957, type: 3}
+  scale: 0.045
   colourMap:
     serializedVersion: 2
-    key0: {r: 1, g: 1, b: 1, a: 1}
-    key1: {r: 1, g: 1, b: 1, a: 1}
-    key2: {r: 0, g: 0, b: 0, a: 0}
-    key3: {r: 0, g: 0, b: 0, a: 0}
+    key0: {r: 0, g: 0.34919024, b: 1, a: 1}
+    key1: {r: 0, g: 1, b: 0.869997, a: 1}
+    key2: {r: 1, g: 0.95132554, b: 0, a: 0}
+    key3: {r: 1, g: 0.3722233, b: 0, a: 0}
     key4: {r: 0, g: 0, b: 0, a: 0}
     key5: {r: 0, g: 0, b: 0, a: 0}
     key6: {r: 0, g: 0, b: 0, a: 0}
     key7: {r: 0, g: 0, b: 0, a: 0}
     ctime0: 0
-    ctime1: 65535
-    ctime2: 0
-    ctime3: 0
+    ctime1: 21823
+    ctime2: 43712
+    ctime3: 65535
     ctime4: 0
     ctime5: 0
     ctime6: 0
@@ -200,10 +199,10 @@ MonoBehaviour:
     atime7: 0
     m_Mode: 0
     m_ColorSpace: -1
-    m_NumColorKeys: 2
+    m_NumColorKeys: 4
     m_NumAlphaKeys: 2
-  gradientResolution: 0
-  velocityDisplayMax: 0
+  gradientResolution: 64
+  velocityDisplayMax: 7
 --- !u!114 &271053320
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -216,12 +215,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b8c63363de8f7cc44b54fdc41cb0a532, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  particleCount: 0
+  particleCount: 1000
   initialVelocity: {x: 0, y: 0}
-  spawnCentre: {x: 0, y: 0}
-  spawnSize: {x: 0, y: 0}
-  jitterStr: 0
-  showSpawnBoundsGizmos: 0
+  spawnCentre: {x: -1.28, y: 0.58}
+  spawnSize: {x: 6.24, y: 7.72}
+  jitterStr: 0.02
+  showSpawnBoundsGizmos: 1
+  defaultCollisionRadius: 0.05
 --- !u!114 &271053321
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -242,21 +242,21 @@ MonoBehaviour:
   boundsSize: {x: 17, y: 9}
   obstacleSize: {x: 0, y: 0}
   obstacleCentre: {x: 0, y: 0}
-  sensorRadius: 1
+  sensorRadius: 0.4
   idealNeighborCount: 8
   pressureMultiplier: 8
   viscosity: 1
   drag: 0.1
-  collisionRadius: 0.05
-  collisionStiffness: 20
+  collisionRadius: 0.15
+  collisionStiffness: 200
   verticalSupport: 0
   maxSpeed: 5
   maxForce: 50
   interactionRadius: 3
   interactionStrength: 200
-  compute: {fileID: 0}
-  spawner: {fileID: 0}
-  display: {fileID: 0}
+  compute: {fileID: 7200000, guid: 5043eb7d5ab6abf4c91210898650c3d1, type: 3}
+  spawner: {fileID: 271053320}
+  display: {fileID: 271053319}
 --- !u!1 &963194225
 GameObject:
   m_ObjectHideFlags: 0

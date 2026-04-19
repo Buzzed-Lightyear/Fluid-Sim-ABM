@@ -11,6 +11,9 @@ public class ParticleSpawner : MonoBehaviour
     public float jitterStr;
     public bool showSpawnBoundsGizmos;
 
+    [Tooltip("Initial per-agent hard-collision radius. Each particle gets this value in the CollisionRadii buffer; later tasks can vary it by agent type.")]
+    public float defaultCollisionRadius = 0.05f;
+
     public ParticleSpawnData GetSpawnData()
     {
         ParticleSpawnData data = new ParticleSpawnData(particleCount);
@@ -35,6 +38,7 @@ public class ParticleSpawner : MonoBehaviour
                 Vector2 jitter = dir * jitterStr * ((float)rng.NextDouble() - 0.5f);
                 data.positions[i] = new Vector2((tx - 0.5f) * spawnSize.x, (ty - 0.5f) * spawnSize.y) + jitter + spawnCentre;
                 data.velocities[i] = initialVelocity;
+                data.collisionRadii[i] = defaultCollisionRadius;
                 i++;
             }
         }
@@ -46,11 +50,13 @@ public class ParticleSpawner : MonoBehaviour
     {
         public float2[] positions;
         public float2[] velocities;
+        public float[] collisionRadii;
 
         public ParticleSpawnData(int num)
         {
             positions = new float2[num];
             velocities = new float2[num];
+            collisionRadii = new float[num];
         }
     }
 

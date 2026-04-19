@@ -1,6 +1,7 @@
-﻿#pragma kernel ExternalForces
-#pragma kernel UpdateSpatialHash 
-#pragma kernel UpdateBoids
+#pragma kernel ExternalForces
+#pragma kernel UpdateSpatialHash
+#pragma kernel HardCollision
+#pragma kernel UpdateBehavior
 #pragma kernel UpdatePositions
 
 #include "./SpatialHash.hlsl"
@@ -12,6 +13,7 @@ RWStructuredBuffer<float2> Positions;
 RWStructuredBuffer<float2> PredictedPositions;
 RWStructuredBuffer<float2> Velocities;
 RWStructuredBuffer<float2> Densities;
+RWStructuredBuffer<float> CollisionRadii;
 RWStructuredBuffer<uint3> SpatialIndices;
 RWStructuredBuffer<uint> SpatialOffsets;
 
@@ -19,17 +21,16 @@ RWStructuredBuffer<uint> SpatialOffsets;
 const uint numParticles;
 const float gravity;
 const float deltaTime;
-const float wallBounciness; 
+const float wallBounciness;
 
 // Fluid / Swarm Settings
-const float sensorRadius; 
+const float sensorRadius;
 const float idealNeighborCount;
 const float pressureMultiplier;
 const float viscosity;
 const float drag;
 
 // Stability Settings
-const float collisionRadius;
 const float collisionStiffness;// The kick multiplier
 const float verticalSupport;
 
@@ -44,7 +45,7 @@ const float interactionInputStrength;
 const float interactionInputRadius;
 const float2 obstacleSize;
 const float2 obstacleCentre;
- 
+
 
 // --- Kernel 1: External Forces ---
 [numthreads(NumThreads, 1, 1)]
@@ -80,33 +81,29 @@ void UpdateSpatialHash(uint3 id : SV_DispatchThreadID)
         return;
 
     SpatialOffsets[id.x] = numParticles;
-    
+
     // Use sensorRadius for the grid size
     int2 cell = GetCell2D(PredictedPositions[id.x], sensorRadius);
     uint hash = HashCell2D(cell);
     uint key = KeyFromHash(hash, numParticles);
-    
+
     SpatialIndices[id.x] = uint3(id.x, hash, key);
 }
 
-// --- Kernel 3: Swarm Physics ---
+// --- Kernel 3: Hard Collision (granular physics, per-agent radii) ---
+// Stiff penalty spring that prevents overlap. No force clamp - collision physics is
+// immediate. Per-agent CollisionRadii makes each particle's physical size independent
+// of the behavioral sensing radius.
 [numthreads(NumThreads, 1, 1)]
-void UpdateBoids(uint3 id : SV_DispatchThreadID)
+void HardCollision(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= numParticles)
         return;
 
     float2 pos = PredictedPositions[id.x];
-    float2 myVel = Velocities[id.x];
+    float myRadius = CollisionRadii[id.x];
     int2 originCell = GetCell2D(pos, sensorRadius);
-    
-    float2 pressureForce = 0;
-    float2 viscosityForce = 0;
     float2 colForce = 0;
-    float avgY = 0;
-    int neighborCount = 0;
-    
-    float searchRad = max(sensorRadius, collisionRadius * 2.01);
 
     for (int i = 0; i < 9; i++)
     {
@@ -130,50 +127,90 @@ void UpdateBoids(uint3 id : SV_DispatchThreadID)
             float2 neighborPos = PredictedPositions[neighborIndex];
             float2 offset = neighborPos - pos;
             float sqrDst = dot(offset, offset);
-            
-            if (sqrDst < searchRad * searchRad)
+
+            float minDst = myRadius + CollisionRadii[neighborIndex];
+            if (sqrDst >= minDst * minDst)
+                continue;
+
+            float dst = sqrt(sqrDst);
+            if (dst <= 0.0001)
+                continue;
+
+            float kick = (minDst - dst) / minDst;
+            colForce -= (offset / dst) * (kick * kick * collisionStiffness);
+        }
+    }
+
+    Velocities[id.x] += colForce * deltaTime;
+}
+
+// --- Kernel 4: Behavioral Steering ---
+// Separation ("pressure"), alignment ("viscosity"), and vertical support.
+// Hard collision has already been applied by the previous kernel.
+[numthreads(NumThreads, 1, 1)]
+void UpdateBehavior(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    float2 pos = PredictedPositions[id.x];
+    float2 myVel = Velocities[id.x];
+    int2 originCell = GetCell2D(pos, sensorRadius);
+
+    float2 pressureForce = 0;
+    float2 viscosityForce = 0;
+    float avgY = 0;
+    int neighborCount = 0;
+
+    for (int i = 0; i < 9; i++)
+    {
+        uint hash = HashCell2D(originCell + offsets2D[i]);
+        uint key = KeyFromHash(hash, numParticles);
+        uint currIndex = SpatialOffsets[key];
+
+        while (currIndex < numParticles)
+        {
+            uint3 indexData = SpatialIndices[currIndex];
+            currIndex++;
+
+            if (indexData[2] != key)
+                break;
+            if (indexData[1] != hash)
+                continue;
+            if (indexData[0] == id.x)
+                continue;
+
+            uint neighborIndex = indexData[0];
+            float2 neighborPos = PredictedPositions[neighborIndex];
+            float2 offset = neighborPos - pos;
+            float sqrDst = dot(offset, offset);
+
+            if (sqrDst < sensorRadius * sensorRadius)
             {
                 float dst = sqrt(sqrDst);
                 if (dst > 0.0001)
                 {
-                    // ------------------------------------------------------------------
-                    // LAYER 1: PHYSICAL BODY (Granular Physics)
-                    // ------------------------------------------------------------------
-                    // Forcibly prevents overlap, mimicking granular material.
-                    float minDst = collisionRadius * 2.0;
-                    if (dst < minDst)
-                    {
-                        float kick = (minDst - dst) / minDst;
-                        // Penalty Force: A stiff spring that kicks particles apart if they touch.
-                        // FUTURE ABM: Keep this layer constant (physics) but change the
-                        // collisionRadius based on agent type (e.g., Truck vs Car).
-                        colForce -= (offset / dst) * (kick * kick * collisionStiffness);
-                    }
-                
                     // ------------------------------------------------------------------
                     // LAYER 2: AGENT BEHAVIOR (boids-like steering expressed as forces)
                     // ------------------------------------------------------------------
                     // Uses fluid-style terms (pressure/viscosity) that map roughly to separation/alignment.
                     // This represents the "Decision Making" or "Social" layer.
                     // Agents use sensors to look at neighbors and decide how to steer.
-                    if (dst < sensorRadius)
-                    {
-                        neighborCount++;
+                    neighborCount++;
 
-                        // A. COHESION (Social Gathering, not full cohesion yet)
-                        // Currently related to cohesion only in the sense that it act as "Vertical Support" to keep the pile upright,
-                        //  is not implemented in the classic center-of-mass sense here.
-                        // FUTURE ABM: Calculate full center-of-mass (avgX, avgY) to make agents clump together.
-                        avgY += neighborPos.y;
+                    // A. COHESION (Social Gathering, not full cohesion yet)
+                    // Currently related to cohesion only in the sense that it act as "Vertical Support" to keep the pile upright,
+                    //  is not implemented in the classic center-of-mass sense here.
+                    // FUTURE ABM: Calculate full center-of-mass (avgX, avgY) to make agents clump together.
+                    avgY += neighborPos.y;
 
-                        // B. SEPARATION (Personal Space)
-                        // "pressure" ~ separation (move away from crowding)
-                        pressureForce -= (offset / dst) * (1.0 / dst);
+                    // B. SEPARATION (Personal Space)
+                    // "pressure" ~ separation (move away from crowding)
+                    pressureForce -= (offset / dst) * (1.0 / dst);
 
-                        // C. ALIGNMENT (Peer Pressure)
-                        // "viscosity" ~ alignment (match neighbor velocity) 
-                        viscosityForce += (Velocities[neighborIndex] - myVel) / dst;
-                    }
+                    // C. ALIGNMENT (Peer Pressure)
+                    // "viscosity" ~ alignment (match neighbor velocity)
+                    viscosityForce += (Velocities[neighborIndex] - myVel) / dst;
                 }
             }
         }
@@ -181,14 +218,9 @@ void UpdateBoids(uint3 id : SV_DispatchThreadID)
 
     float2 totalForce = 0;
 
-    // 1. APPLY PHYSICAL CONSTRAINTS
-    totalForce += colForce;
-
-    // 2. APPLY BEHAVIORAL STEERING (Conditional)
+    // APPLY BEHAVIORAL STEERING (Conditional)
     if (neighborCount > 0)
     {
-        
-        
         // DENSITY CONSTRAINT (Social Comfort)
         // Acts like a feedback controller: only apply separation-like pressure when
         //   neighborCount exceeds idealNeighborCount (a target local density).
@@ -226,7 +258,7 @@ void UpdateBoids(uint3 id : SV_DispatchThreadID)
     Densities[id.x] = float2(neighborCount, 0);
 }
 
-// --- Kernel 4: Integration ---
+// --- Kernel 5: Integration ---
 [numthreads(NumThreads, 1, 1)]
 void UpdatePositions(uint3 id : SV_DispatchThreadID)
 {
@@ -234,7 +266,7 @@ void UpdatePositions(uint3 id : SV_DispatchThreadID)
         return;
 
     Positions[id.x] += Velocities[id.x] * deltaTime;
-    
+
     // Bounds Check
     float2 pos = Positions[id.x];
     float2 vel = Velocities[id.x];

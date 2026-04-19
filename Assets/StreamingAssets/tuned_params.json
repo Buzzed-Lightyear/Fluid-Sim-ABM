@@ -1,0 +1,8 @@
+{
+  "pressureMultiplier": 9.2,
+  "idealNeighborCount": 6.8,
+  "viscosity": 1,
+  "cohesionStrength": 0.5,
+  "drag": 0.1,
+  "collisionStiffness": 17
+}

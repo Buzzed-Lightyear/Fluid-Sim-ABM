@@ -352,4 +352,20 @@ public class SwarmSimulation : MonoBehaviour
             }
         }
     }
+
+    [ContextMenu("Apply Tuned Params")]
+    void ApplyTunedParams()
+    {
+        string path = System.IO.Path.Combine(Application.streamingAssetsPath, "tuned_params.json");
+        if (!System.IO.File.Exists(path))
+        {
+            Debug.LogWarning($"Tuned params not found at {path}. Run the tuner first (RUN_TUNER=1 dotnet test).");
+            return;
+        }
+        JsonUtility.FromJsonOverwrite(System.IO.File.ReadAllText(path), this);
+#if UNITY_EDITOR
+        UnityEditor.EditorUtility.SetDirty(this);
+#endif
+        Debug.Log($"Applied tuned params from {path}");
+    }
 }

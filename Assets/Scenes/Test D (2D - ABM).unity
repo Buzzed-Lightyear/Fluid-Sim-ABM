@@ -245,7 +245,7 @@ MonoBehaviour:
   sensorRadius: 0.2
   idealNeighborCount: 21
   pressureMultiplier: 1
-  viscosity: 0.03
+  viscosity: 0.5
   drag: 0.1
   cohesionStrength: 0.5
   collisionRadius: 0.05

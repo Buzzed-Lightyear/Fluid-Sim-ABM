@@ -1,6 +1,30 @@
 using UnityEngine;
 using Unity.Mathematics;
 
+/*
+ * Working parameters for accruate fluid sim. particle count: 16K 
+ *   iteration per frame: 7
+ *   gravity: -9.8
+ *   wall bounciness: 0, testing 0 to see if system ever settles. 
+ * 
+ *   sensor radius: 0.2 
+ *   ideal neighbor count: 21 (~18, have air pockets in the top layers, larger values can result in bottom stacking artifact) 
+ *   pressure multiplier: 1 (0-1 have largest behavior changes, then less effective w higher value) 
+ *   viscosity: 0.3
+ *   cohesion strength: 0.2 (no effect till larger sensor raidus ~1) 
+ * 
+ *   collision radius: 0.05 (lower radius seems to have better fluid behavior, gas maybe can use higher values) 
+ *   collision stiffness: 100, 50 works too visually 
+ * 
+ *   -- Speed, force, ineraction parameters have not been tested much. 
+ *   max speed: 5, force: 50
+ * 
+ *   Interaction radius: 2.5
+ *   Interaction strength: 75
+ * 
+ *   Particle Spawner: jitter: 0.02, collision radius: 0.05
+ */
+
 public class SwarmSimulation : MonoBehaviour
 {
     public event System.Action SimulationStepCompleted;
@@ -31,15 +55,15 @@ public class SwarmSimulation : MonoBehaviour
     [Tooltip("Air resistance. 0 = Vacuum, 1 = Molasses.")]
     [Range(0, 1)] public float drag = 0.1f;
 
+    [Tooltip("Pull toward the center of mass of neighbors. 0 = disabled. 0.1-1.0 typical.")]
+    public float cohesionStrength = 0.5f;
+
     [Header("Collision & Stability (Structure)")]
     [Tooltip("Reference value for the sensorRadius sanity check. Actual per-agent collision radii come from ParticleSpawner.defaultCollisionRadius and are stored in a GPU buffer.")]
     public float collisionRadius = 0.05f;
 
     [Tooltip("How hard solid particles push back when overlapping. Higher = Stiffer/Harder.")]
     public float collisionStiffness = 20; // The "Kick" multiplier
-
-    [Tooltip("Helps the pile stand up against gravity. 0 = Collapses flat.")]
-    public float verticalSupport = 0.0f; // Not needed?
 
     [Header("Safety Limits")]
     public float maxSpeed = 5;
@@ -171,9 +195,9 @@ public class SwarmSimulation : MonoBehaviour
         compute.SetFloat("pressureMultiplier", pressureMultiplier);
         compute.SetFloat("viscosity", viscosity);
         compute.SetFloat("drag", drag);
+        compute.SetFloat("cohesionStrength", cohesionStrength);
 
         compute.SetFloat("collisionStiffness", collisionStiffness);
-        compute.SetFloat("verticalSupport", verticalSupport);
 
         compute.SetFloat("maxSpeed", maxSpeed);
         compute.SetFloat("maxForce", maxForce);

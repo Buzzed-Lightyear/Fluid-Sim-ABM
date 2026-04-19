@@ -32,7 +32,7 @@ const float drag;
 
 // Stability Settings
 const float collisionStiffness;// The kick multiplier
-const float verticalSupport;
+const float cohesionStrength;
 
 // Limits
 const float maxSpeed;
@@ -145,7 +145,7 @@ void HardCollision(uint3 id : SV_DispatchThreadID)
 }
 
 // --- Kernel 4: Behavioral Steering ---
-// Separation ("pressure"), alignment ("viscosity"), and vertical support.
+// Separation ("pressure"), alignment ("viscosity"), and cohesion (center-of-mass pull).
 // Hard collision has already been applied by the previous kernel.
 [numthreads(NumThreads, 1, 1)]
 void UpdateBehavior(uint3 id : SV_DispatchThreadID)
@@ -159,7 +159,7 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
 
     float2 pressureForce = 0;
     float2 viscosityForce = 0;
-    float avgY = 0;
+    float2 avgPos = 0;
     int neighborCount = 0;
 
     for (int i = 0; i < 9; i++)
@@ -198,11 +198,8 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
                     // Agents use sensors to look at neighbors and decide how to steer.
                     neighborCount++;
 
-                    // A. COHESION (Social Gathering, not full cohesion yet)
-                    // Currently related to cohesion only in the sense that it act as "Vertical Support" to keep the pile upright,
-                    //  is not implemented in the classic center-of-mass sense here.
-                    // FUTURE ABM: Calculate full center-of-mass (avgX, avgY) to make agents clump together.
-                    avgY += neighborPos.y;
+                    // A. COHESION (Flocking - pull toward neighbor center-of-mass)
+                    avgPos += neighborPos;
 
                     // B. SEPARATION (Personal Space)
                     // "pressure" ~ separation (move away from crowding)
@@ -234,10 +231,9 @@ void UpdateBehavior(uint3 id : SV_DispatchThreadID)
         // Apply Alignment (Viscosity)
         totalForce += viscosityForce * viscosity;
 
-        // Apply Cohesion (Vertical Stability)
-        avgY /= neighborCount;
-        float yOffset = avgY - pos.y;
-        totalForce += float2(0, yOffset * verticalSupport);
+        // Apply Cohesion (pull toward neighbor center-of-mass)
+        avgPos /= neighborCount;
+        totalForce += (avgPos - pos) * cohesionStrength;
     }
 
     // Global Damping (Atmosphere/Friction)

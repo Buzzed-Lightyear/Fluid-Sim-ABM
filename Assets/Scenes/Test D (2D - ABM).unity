@@ -215,7 +215,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b8c63363de8f7cc44b54fdc41cb0a532, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  particleCount: 1000
+  particleCount: 16000
   initialVelocity: {x: 0, y: 0}
   spawnCentre: {x: -1.28, y: 0.58}
   spawnSize: {x: 6.24, y: 7.72}
@@ -236,24 +236,24 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   timeScale: 1
   fixedTimeStep: 0
-  iterationsPerFrame: 3
-  gravity: -9.81
-  wallBounciness: 0.24
+  iterationsPerFrame: 7
+  gravity: -9.8
+  wallBounciness: 0
   boundsSize: {x: 17, y: 9}
   obstacleSize: {x: 0, y: 0}
   obstacleCentre: {x: 0, y: 0}
-  sensorRadius: 0.4
-  idealNeighborCount: 8
-  pressureMultiplier: 8
-  viscosity: 1
+  sensorRadius: 0.2
+  idealNeighborCount: 21
+  pressureMultiplier: 1
+  viscosity: 0.03
   drag: 0.1
-  collisionRadius: 0.15
-  collisionStiffness: 200
-  verticalSupport: 0
+  cohesionStrength: 0.5
+  collisionRadius: 0.05
+  collisionStiffness: 50
   maxSpeed: 5
   maxForce: 50
-  interactionRadius: 3
-  interactionStrength: 200
+  interactionRadius: 2.5
+  interactionStrength: 75
   compute: {fileID: 7200000, guid: 5043eb7d5ab6abf4c91210898650c3d1, type: 3}
   spawner: {fileID: 271053320}
   display: {fileID: 271053319}

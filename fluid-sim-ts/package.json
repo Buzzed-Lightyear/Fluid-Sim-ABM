@@ -1,0 +1,22 @@
+{
+  "name": "fluid-sim-ts",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "three": "0.168.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/three": "0.168.0",
+    "typescript": "5.4.5",
+    "vite": "5.3.1",
+    "vitest": "1.6.0"
+  }
+}

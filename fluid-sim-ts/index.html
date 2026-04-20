@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Fluid Sim ABM</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    #webgpu-error {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #1a1a1a;
+      color: #f88;
+      font: 1.2em monospace;
+      place-items: center;
+      text-align: center;
+      padding: 2em;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="webgpu-error"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

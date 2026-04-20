@@ -1,0 +1,314 @@
+#pragma kernel ExternalForces
+#pragma kernel UpdateSpatialHash
+#pragma kernel HardCollision
+#pragma kernel UpdateBehavior
+#pragma kernel UpdatePositions
+
+#include "./SpatialHash.hlsl"
+
+static const int NumThreads = 64;
+
+// Buffers
+RWStructuredBuffer<float2> Positions;
+RWStructuredBuffer<float2> PredictedPositions;
+RWStructuredBuffer<float2> Velocities;
+RWStructuredBuffer<float2> Densities;
+RWStructuredBuffer<float> CollisionRadii;
+RWStructuredBuffer<uint> States;
+RWStructuredBuffer<uint3> SpatialIndices;
+RWStructuredBuffer<uint> SpatialOffsets;
+
+// Per-state parameter table. Index by AgentState (0=Calm, 1=Scared, 2=Huddle).
+// Packed: x = idealNeighborCount, y = cohesionMultiplier, z = speedMultiplier, w = unused.
+static const uint NumStates = 3;
+const float4 StateParams[NumStates];
+
+// Simulation Settings
+const uint numParticles;
+const float gravity;
+const float deltaTime;
+const float wallBounciness;
+
+// Fluid / Swarm Settings
+const float sensorRadius;
+const float idealNeighborCount;
+const float pressureMultiplier;
+const float viscosity;
+const float drag;
+
+// Stability Settings
+const float collisionStiffness;// The kick multiplier
+const float cohesionStrength;
+
+// Limits
+const float maxSpeed;
+const float maxForce;
+
+// Interaction / Bounds
+const float2 boundsSize;
+const float2 interactionInputPoint;
+const float interactionInputStrength;
+const float interactionInputRadius;
+const float2 obstacleSize;
+const float2 obstacleCentre;
+
+
+// --- Kernel 1: External Forces ---
+[numthreads(NumThreads, 1, 1)]
+void ExternalForces(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    float2 force = float2(0, gravity);
+
+    if (interactionInputStrength != 0)
+    {
+        float2 offset = interactionInputPoint - Positions[id.x];
+        float sqrDst = dot(offset, offset);
+        if (sqrDst < interactionInputRadius * interactionInputRadius)
+        {
+            float dst = sqrt(sqrDst);
+            float2 dir = offset / dst;
+            float t = 1 - (dst / interactionInputRadius);
+            force += dir * (interactionInputStrength * t);
+        }
+    }
+
+    Velocities[id.x] += force * deltaTime;
+    PredictedPositions[id.x] = Positions[id.x] + Velocities[id.x] * (1.0 / 120.0);
+}
+
+// --- Kernel 2: Spatial Hash ---
+[numthreads(NumThreads, 1, 1)]
+void UpdateSpatialHash(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    SpatialOffsets[id.x] = numParticles;
+
+    // Use sensorRadius for the grid size
+    int2 cell = GetCell2D(PredictedPositions[id.x], sensorRadius);
+    uint hash = HashCell2D(cell);
+    uint key = KeyFromHash(hash, numParticles);
+
+    SpatialIndices[id.x] = uint3(id.x, hash, key);
+}
+
+// --- Kernel 3: Hard Collision (granular physics, per-agent radii) ---
+// Stiff penalty spring that prevents overlap. No force clamp - collision physics is
+// immediate. Per-agent CollisionRadii makes each particle's physical size independent
+// of the behavioral sensing radius.
+[numthreads(NumThreads, 1, 1)]
+void HardCollision(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    float2 pos = PredictedPositions[id.x];
+    float myRadius = CollisionRadii[id.x];
+    int2 originCell = GetCell2D(pos, sensorRadius);
+    float2 colForce = 0;
+
+    for (int i = 0; i < 9; i++)
+    {
+        uint hash = HashCell2D(originCell + offsets2D[i]);
+        uint key = KeyFromHash(hash, numParticles);
+        uint currIndex = SpatialOffsets[key];
+
+        while (currIndex < numParticles)
+        {
+            uint3 indexData = SpatialIndices[currIndex];
+            currIndex++;
+
+            if (indexData[2] != key)
+                break;
+            if (indexData[1] != hash)
+                continue;
+            if (indexData[0] == id.x)
+                continue;
+
+            uint neighborIndex = indexData[0];
+            float2 neighborPos = PredictedPositions[neighborIndex];
+            float2 offset = neighborPos - pos;
+            float sqrDst = dot(offset, offset);
+
+            float minDst = myRadius + CollisionRadii[neighborIndex];
+            if (sqrDst >= minDst * minDst)
+                continue;
+
+            float dst = sqrt(sqrDst);
+            if (dst <= 0.0001)
+                continue;
+
+            float kick = (minDst - dst) / minDst;
+            colForce -= (offset / dst) * (kick * kick * collisionStiffness);
+        }
+    }
+
+    Velocities[id.x] += colForce * deltaTime;
+}
+
+// --- Kernel 4: Behavioral Steering ---
+// Separation ("pressure"), alignment ("viscosity"), and cohesion (center-of-mass pull).
+// Hard collision has already been applied by the previous kernel.
+[numthreads(NumThreads, 1, 1)]
+void UpdateBehavior(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    float2 pos = PredictedPositions[id.x];
+    float2 myVel = Velocities[id.x];
+    int2 originCell = GetCell2D(pos, sensorRadius);
+
+    // State lookup: unknown values fall back to Calm (index 0).
+    uint stateIdx = States[id.x];
+    if (stateIdx >= NumStates) stateIdx = 0;
+    float4 sp = StateParams[stateIdx];
+    float ideal = sp.x;
+    float cohMult = sp.y;
+    float speedMult = sp.z;
+
+    float2 pressureForce = 0;
+    float2 viscosityForce = 0;
+    float2 avgPos = 0;
+    int neighborCount = 0;
+
+    for (int i = 0; i < 9; i++)
+    {
+        uint hash = HashCell2D(originCell + offsets2D[i]);
+        uint key = KeyFromHash(hash, numParticles);
+        uint currIndex = SpatialOffsets[key];
+
+        while (currIndex < numParticles)
+        {
+            uint3 indexData = SpatialIndices[currIndex];
+            currIndex++;
+
+            if (indexData[2] != key)
+                break;
+            if (indexData[1] != hash)
+                continue;
+            if (indexData[0] == id.x)
+                continue;
+
+            uint neighborIndex = indexData[0];
+            float2 neighborPos = PredictedPositions[neighborIndex];
+            float2 offset = neighborPos - pos;
+            float sqrDst = dot(offset, offset);
+
+            if (sqrDst < sensorRadius * sensorRadius)
+            {
+                float dst = sqrt(sqrDst);
+                if (dst > 0.0001)
+                {
+                    // ------------------------------------------------------------------
+                    // LAYER 2: AGENT BEHAVIOR (boids-like steering expressed as forces)
+                    // ------------------------------------------------------------------
+                    // Uses fluid-style terms (pressure/viscosity) that map roughly to separation/alignment.
+                    // This represents the "Decision Making" or "Social" layer.
+                    // Agents use sensors to look at neighbors and decide how to steer.
+                    neighborCount++;
+
+                    // A. COHESION (Flocking - pull toward neighbor center-of-mass)
+                    avgPos += neighborPos;
+
+                    // B. SEPARATION (Personal Space)
+                    // "pressure" ~ separation (move away from crowding)
+                    pressureForce -= (offset / dst) * (1.0 / dst);
+
+                    // C. ALIGNMENT (Peer Pressure)
+                    // "viscosity" ~ alignment (match neighbor velocity)
+                    viscosityForce += (Velocities[neighborIndex] - myVel) / dst;
+                }
+            }
+        }
+    }
+
+    float2 totalForce = 0;
+
+    // APPLY BEHAVIORAL STEERING (Conditional)
+    if (neighborCount > 0)
+    {
+        // DENSITY CONSTRAINT (Social Comfort) - state-modulated ideal count.
+        //   Calm:   ideal = idealNeighborCount (baseline)
+        //   Scared: ideal = 0  (always feels over-crowded -> strong separation)
+        //   Huddle: ideal = 20 (wants company -> separation rarely fires)
+        float densityError = neighborCount - ideal;
+        if (densityError > 0)
+            totalForce += pressureForce * pressureMultiplier * densityError;
+
+        // Apply Alignment (Viscosity)
+        totalForce += viscosityForce * viscosity;
+
+        // Apply Cohesion (pull toward neighbor center-of-mass), scaled by state.
+        avgPos /= neighborCount;
+        totalForce += (avgPos - pos) * cohesionStrength * cohMult;
+    }
+
+    // Global Damping (Atmosphere/Friction)
+    totalForce -= myVel * drag;
+
+    // MOTOR LIMITS
+    // Agents have a maximum force they can exert (muscle strength)
+    if (length(totalForce) > maxForce)
+        totalForce = normalize(totalForce) * maxForce;
+
+    Velocities[id.x] += totalForce * deltaTime;
+
+    // SPEED LIMITS - state-modulated (Scared agents can run faster).
+    float speedCap = maxSpeed * speedMult;
+    if (length(Velocities[id.x]) > speedCap)
+        Velocities[id.x] = normalize(Velocities[id.x]) * speedCap;
+
+    Densities[id.x] = float2(neighborCount, 0);
+}
+
+// --- Kernel 5: Integration ---
+[numthreads(NumThreads, 1, 1)]
+void UpdatePositions(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= numParticles)
+        return;
+
+    Positions[id.x] += Velocities[id.x] * deltaTime;
+
+    // Bounds Check
+    float2 pos = Positions[id.x];
+    float2 vel = Velocities[id.x];
+    const float2 halfSize = boundsSize * 0.5;
+    float2 edgeDst = halfSize - abs(pos);
+
+    if (edgeDst.x <= 0)
+    {
+        pos.x = halfSize.x * sign(pos.x);
+        vel.x *= -1 * wallBounciness;
+    }
+    if (edgeDst.y <= 0)
+    {
+        pos.y = halfSize.y * sign(pos.y);
+        vel.y *= -1 * wallBounciness;
+    }
+
+    // Rectangular obstacle. Zero obstacleSize is a no-op (halfSize = 0, edgeDst always <= 0).
+    const float2 obstacleHalfSize = obstacleSize * 0.5;
+    float2 obstacleEdgeDst = obstacleHalfSize - abs(pos - obstacleCentre);
+    if (obstacleEdgeDst.x >= 0 && obstacleEdgeDst.y >= 0)
+    {
+        if (obstacleEdgeDst.x < obstacleEdgeDst.y)
+        {
+            pos.x = obstacleHalfSize.x * sign(pos.x - obstacleCentre.x) + obstacleCentre.x;
+            vel.x *= -1 * wallBounciness;
+        }
+        else
+        {
+            pos.y = obstacleHalfSize.y * sign(pos.y - obstacleCentre.y) + obstacleCentre.y;
+            vel.y *= -1 * wallBounciness;
+        }
+    }
+
+    Positions[id.x] = pos;
+    Velocities[id.x] = vel;
+}

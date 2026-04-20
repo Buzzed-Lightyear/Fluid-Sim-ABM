@@ -20,29 +20,31 @@ export function buildHardCollisionKernel(buf: BufferManager, u: SimUniforms) {
     const cellY = originCellY.add(oy)
     const hash = hashCell2D(cellX, cellY).toVar()
     const key = keyFromHash(hash, numParticles).toVar()
-    const currIdx = spatialOffsets.element(key).toVar()
 
-    ;(Loop as any)(() => {
-      If(currIdx.greaterThanEqual(numParticles), () => Break())
-      const pIdx = spatialIdx.element(currIdx).toVar()
-      const h = spatialHash_.element(currIdx).toVar()
-      const k = spatialKey.element(currIdx).toVar()
-      currIdx.addAssign(uint(1))
-      If(k.notEqual(key), () => Break())
-      If(h.notEqual(hash), () => Continue())
-      If(pIdx.equal(particleI), () => Continue())
+    // Loop from spatialOffsets[key] to numParticles; auto-increments each iteration.
+    // Break when the key changes (sorted array property), Continue to skip hash/self.
+    Loop(
+      { type: 'uint', start: spatialOffsets.element(key), end: numParticles },
+      ({ i: idx }) => {
+        const pIdx = spatialIdx.element(idx).toVar()
+        const h = spatialHash_.element(idx).toVar()
+        const k = spatialKey.element(idx).toVar()
+        If(k.notEqual(key), () => Break())
+        If(h.notEqual(hash), () => Continue())
+        If(pIdx.equal(particleI), () => Continue())
 
-      const offset = predictedPos.element(pIdx).sub(posI)
-      const sqrDst = dot(offset, offset)
-      const minDst = myRadius.add(collisionRadii.element(pIdx))
-      If(sqrDst.greaterThanEqual(minDst.mul(minDst)), () => Continue())
+        const offset = predictedPos.element(pIdx).sub(posI)
+        const sqrDst = dot(offset, offset)
+        const minDst = myRadius.add(collisionRadii.element(pIdx))
+        If(sqrDst.greaterThanEqual(minDst.mul(minDst)), () => Continue())
 
-      const dst = sqrt(sqrDst)
-      If(dst.lessThanEqual(float(0.0001)), () => Continue())
+        const dst = sqrt(sqrDst)
+        If(dst.lessThanEqual(float(0.0001)), () => Continue())
 
-      const kick = minDst.sub(dst).div(minDst)
-      colForce.subAssign(offset.div(dst).mul(kick.mul(kick).mul(collisionStiffness)))
-    })
+        const kick = minDst.sub(dst).div(minDst)
+        colForce.subAssign(offset.div(dst).mul(kick.mul(kick).mul(collisionStiffness)))
+      }
+    )
   }
 
   return (Fn as any)((): void => {

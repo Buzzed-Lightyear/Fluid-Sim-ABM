@@ -17,7 +17,8 @@ export const getCellY = Fn(([posY, radius]: [any, any]) =>
 export const hashCell2D = Fn(([cellX, cellY]: [any, any]) => {
   const ucx = uint(cellX)  // wrapping cast (negative int → large uint, matching HLSL)
   const ucy = uint(cellY)
-  return ucx.mul(HASH_K1).add(ucy.mul(HASH_K2))  // uint wrapping arithmetic
+  // Use explicit uint() literals to avoid uint×float type error in WGSL
+  return ucx.mul(uint(HASH_K1)).add(ucy.mul(uint(HASH_K2)))
 })
 
 // Reduce hash to a table key.

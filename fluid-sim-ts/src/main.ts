@@ -30,14 +30,23 @@ async function main() {
     return
   }
 
-  // --- Renderer ---
+  // [DIAG-1] Renderer init — log backend and surface any init errors
+  console.log('[DIAG-1] WebGPURenderer init...')
   const renderer = new WebGPURenderer({ antialias: true })
   renderer.setPixelRatio(window.devicePixelRatio)
   renderer.setSize(window.innerWidth, window.innerHeight)
-  renderer.setClearColor(new Color(0x0a0a0f))
+  // [DIAG-3] Magenta clear: if the canvas presents this color, the renderer is alive
+  renderer.setClearColor(new Color(0xff00ff))
   document.body.appendChild(renderer.domElement)
 
-  await renderer.init()
+  try {
+    await renderer.init()
+  } catch (err) {
+    console.error('[DIAG-1] renderer.init() FAILED:', err)
+    return
+  }
+  console.log('[DIAG-1] renderer.init() OK  backend:', (renderer as any).backend?.constructor?.name,
+    ' isWebGPU:', (renderer as any).backend?.isWebGPUBackend)
 
   // --- Scene & Camera ---
   const scene = new Scene()
@@ -108,15 +117,32 @@ async function main() {
   })
 
   // --- Render loop ---
+  // [DIAG-2] Frame counter — confirm the loop is alive
+  let frameCount = 0
   let lastTime = performance.now()
 
   async function frame() {
     const now = performance.now()
     const dt = Math.min((now - lastTime) / 1000, 0.05)  // cap at 50ms
     lastTime = now
+    frameCount++
+
+    if (frameCount === 1 || frameCount === 60 || frameCount === 300) {
+      console.log(`[DIAG-2] frame ${frameCount}`)
+    }
 
     sim.tickStateTimers()
-    await sim.update(dt)
+
+    // Protect: compute errors must not kill the render loop.
+    // If sim.update throws, we still render the last valid frame and schedule
+    // the next one — this keeps the magenta/particles visible for bisection.
+    try {
+      await sim.update(dt)
+    } catch (err) {
+      if (frameCount <= 5 || frameCount % 300 === 0) {
+        console.error(`[DIAG] sim.update error (frame ${frameCount}):`, err)
+      }
+    }
 
     renderer.render(scene, camera)
     requestAnimationFrame(frame)

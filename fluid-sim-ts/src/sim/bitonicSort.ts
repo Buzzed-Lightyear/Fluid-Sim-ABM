@@ -13,8 +13,11 @@ export class BitonicSort {
 
   private readonly sortFn: ReturnType<typeof Fn>
   private readonly offsetsFn: ReturnType<typeof Fn>
+  // ComputeNodes created once; uniforms updated between dispatches
+  private sortCompute: any
+  private offsetsCompute: any
 
-  constructor(buf: BufferManager) {
+  constructor(buf: BufferManager, N: number) {
     const { spatialIdx, spatialHash_, spatialKey, spatialOffsets } = buf
     const numEntriesU = this.numEntriesU
     const groupWidthU = this.groupWidthU
@@ -25,7 +28,8 @@ export class BitonicSort {
     this.sortFn = (Fn as any)((): void => {
       const i = instanceIndex
 
-      const hIndex = i.bitAnd(groupWidthU.sub(1))
+      // Use uint(1) to avoid uint−float WGSL type error
+      const hIndex = i.bitAnd(groupWidthU.sub(uint(1)))
       const indexLeft = hIndex.add(groupHeightU.add(uint(1)).mul(i.div(groupWidthU))).toVar()
 
       const rightStepSize = uint(0).toVar()
@@ -72,6 +76,11 @@ export class BitonicSort {
         spatialOffsets.element(key).assign(i)
       })
     })
+
+    // Create ComputeNodes once — reused every dispatch, uniforms updated between passes
+    const nextPow2 = nextPowerOfTwo(N)
+    this.sortCompute    = (this.sortFn    as any).compute(nextPow2 / 2)
+    this.offsetsCompute = (this.offsetsFn as any).compute(N)
   }
 
   async sortAndCalculateOffsets(renderer: WebGPURenderer, N: number): Promise<void> {
@@ -86,10 +95,11 @@ export class BitonicSort {
         this.groupWidthU.value = groupWidth
         this.groupHeightU.value = groupHeight
         this.stepIndexU.value = step
-        await renderer.computeAsync((this.sortFn as any)().compute(nextPow2 / 2))
+        // Reuse the same ComputeNode — uniform values are uploaded before each dispatch
+        await renderer.computeAsync(this.sortCompute)
       }
     }
 
-    await renderer.computeAsync((this.offsetsFn as any)().compute(N))
+    await renderer.computeAsync(this.offsetsCompute)
   }
 }

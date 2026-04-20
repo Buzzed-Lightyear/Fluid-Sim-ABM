@@ -27,12 +27,19 @@ export class SwarmSimulation {
   private readonly N: number
   private readonly sort: BitonicSort
 
-  // TSL compute kernels (built once, dispatched each frame)
+  // TSL kernel Fn nodes (built once — ComputeNodes created below)
   private readonly kExternalForces: ReturnType<typeof buildExternalForcesKernel>
   private readonly kSpatialHash: ReturnType<typeof buildUpdateSpatialHashKernel>
   private readonly kHardCollision: ReturnType<typeof buildHardCollisionKernel>
   private readonly kBehavior: ReturnType<typeof buildUpdateBehaviorKernel>
   private readonly kPositions: ReturnType<typeof buildUpdatePositionsKernel>
+
+  // ComputeNodes created once — reused every frame (prevents per-frame shader recompile)
+  private readonly cExternalForces: any
+  private readonly cSpatialHash: any
+  private readonly cHardCollision: any
+  private readonly cBehavior: any
+  private readonly cPositions: any
 
   // CPU interaction state
   private interactionPoint = { x: 0, y: 0 }
@@ -48,15 +55,22 @@ export class SwarmSimulation {
 
     this.buf = new BufferManager(N)
     this.uniforms = createSimUniforms()
-    this.sort = new BitonicSort(this.buf)
+    this.sort = new BitonicSort(this.buf, N)
     this.scaredTimers = new Int32Array(N)
 
-    // Build kernel Fn nodes (TSL AST is constructed here; shader compilation is lazy)
+    // Build kernel Fn nodes (TSL AST constructed here; actual WGSL compilation is lazy)
     this.kExternalForces = buildExternalForcesKernel(this.buf, this.uniforms)
     this.kSpatialHash    = buildUpdateSpatialHashKernel(this.buf, this.uniforms)
     this.kHardCollision  = buildHardCollisionKernel(this.buf, this.uniforms)
     this.kBehavior       = buildUpdateBehaviorKernel(this.buf, this.uniforms)
     this.kPositions      = buildUpdatePositionsKernel(this.buf, this.uniforms)
+
+    // Create ComputeNodes ONCE — prevents per-frame WGSL recompilation
+    ;(this as any).cExternalForces = (this.kExternalForces as any).compute(N)
+    ;(this as any).cSpatialHash    = (this.kSpatialHash    as any).compute(N)
+    ;(this as any).cHardCollision  = (this.kHardCollision  as any).compute(N)
+    ;(this as any).cBehavior       = (this.kBehavior       as any).compute(N)
+    ;(this as any).cPositions      = (this.kPositions      as any).compute(N)
 
     spawnParticles(this.buf, this.settings, N)
   }
@@ -79,12 +93,12 @@ export class SwarmSimulation {
 
   private async runStep(): Promise<void> {
     const N = this.N
-    await this.renderer.computeAsync((this.kExternalForces as any)().compute(N))
-    await this.renderer.computeAsync((this.kSpatialHash as any)().compute(N))
+    await this.renderer.computeAsync(this.cExternalForces)
+    await this.renderer.computeAsync(this.cSpatialHash)
     await this.sort.sortAndCalculateOffsets(this.renderer, N)
-    await this.renderer.computeAsync((this.kHardCollision as any)().compute(N))
-    await this.renderer.computeAsync((this.kBehavior as any)().compute(N))
-    await this.renderer.computeAsync((this.kPositions as any)().compute(N))
+    await this.renderer.computeAsync(this.cHardCollision)
+    await this.renderer.computeAsync(this.cBehavior)
+    await this.renderer.computeAsync(this.cPositions)
   }
 
   // --- CPU state machine (mirrors SwarmSimulation.cs UpdateStatesCPU) ---
